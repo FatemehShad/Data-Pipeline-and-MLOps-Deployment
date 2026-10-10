@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sales-mlops
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sales-runtime
+  namespace: sales-mlops
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sales-api
+  namespace: sales-mlops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sales-api
+  template:
+    metadata:
+      labels:
+        app: sales-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: train
+          image: sales-mlops:local
+          command: [sh, -c, "sales-mlops pipeline && sales-mlops train"]
+          resources:
+            requests: {cpu: "500m", memory: "512Mi"}
+            limits: {cpu: "2", memory: "2Gi"}
+          volumeMounts:
+            - {name: runtime, mountPath: /app/.runtime}
+      containers:
+        - name: api
+          image: sales-mlops:local
+          ports:
+            - {containerPort: 8000}
+          resources:
+            requests: {cpu: "250m", memory: "512Mi"}
+            limits: {cpu: "1", memory: "1Gi"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          startupProbe:
+            httpGet: {path: /ready, port: 8000}
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /ready, port: 8000}
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+          volumeMounts:
+            - {name: runtime, mountPath: /app/.runtime}
+      volumes:
+        - name: runtime
+          persistentVolumeClaim:
+            claimName: sales-runtime
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sales-api
+  namespace: sales-mlops
+spec:
+  selector:
+    app: sales-api
+  ports:
+    - {port: 80, targetPort: 8000}
+  type: ClusterIP

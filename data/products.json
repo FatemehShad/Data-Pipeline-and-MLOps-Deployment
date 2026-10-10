@@ -1,0 +1,14 @@
+[
+  {
+    "product_id": 1,
+    "category": "books"
+  },
+  {
+    "product_id": 2,
+    "category": "home"
+  },
+  {
+    "product_id": 3,
+    "category": "electronics"
+  }
+]

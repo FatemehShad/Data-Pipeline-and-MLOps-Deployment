@@ -1,0 +1,53 @@
+name: Deploy to AWS EKS
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type deploy to publish to the configured AWS environment"
+        required: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    if: inputs.confirm == 'deploy' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - run: uv sync --frozen && uv run pytest -q && uv run ruff check .
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.3
+      - name: Build, publish and roll out
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          CLUSTER: ${{ vars.EKS_CLUSTER }}
+        run: |
+          set -euo pipefail
+          IMAGE="$REGISTRY/$REPOSITORY:$GITHUB_SHA"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          aws eks update-kubeconfig --name "$CLUSTER"
+          sed "s|sales-mlops:local|$IMAGE|g" deploy/k8s/app.yaml > /tmp/app.yaml
+          kubectl apply -f /tmp/app.yaml
+          kubectl -n sales-mlops rollout status deployment/sales-api --timeout=600s
+      - name: Verify deployed prediction
+        run: |
+          set -euo pipefail
+          kubectl -n sales-mlops port-forward service/sales-api 8000:80 > /tmp/forward.log 2>&1 &
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID"' EXIT
+          curl --fail --retry 15 --retry-all-errors --retry-delay 2 http://localhost:8000/ready
+          curl --fail -H 'Content-Type: application/json' -d '{"units":3,"unit_price":20,"category":"home"}' http://localhost:8000/predict
